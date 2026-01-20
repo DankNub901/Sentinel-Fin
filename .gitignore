@@ -1,0 +1,11 @@
+VSCode-win32-x64-*/
+data/user-data/
+.vscode/
+
+.env
+data/*.csv
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+src/ml/*.pkl
+.vscode/

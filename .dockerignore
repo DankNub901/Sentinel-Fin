@@ -1,0 +1,23 @@
+# Ignore the data folder (it's too big and we mount it via volumes anyway)
+data/
+
+# Ignore the portable VS Code folder
+VSCode*/
+
+# Ignore Python virtual environments
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Ignore local environment secrets
+.env
+
+# Ignore Git history
+.git/
+.gitignore
+
+# Ignore IDE settings
+.vscode/
+.idea/
