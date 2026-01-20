@@ -9,3 +9,6 @@ __pycache__/
 .ipynb_checkpoints/
 src/ml/*.pkl
 .vscode/
+data/**/*.csv
+
+*.pkl

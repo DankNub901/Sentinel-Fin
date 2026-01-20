@@ -22,3 +22,5 @@ shap==0.46.*
 langchain==0.3.14
 langchain-community==0.3.14
 langchain-ollama==0.2.0
+
+huggingface_hub==0.27.*
