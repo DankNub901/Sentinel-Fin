@@ -1,8 +1,7 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, JSON
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, JSON
 from datetime import datetime
-
-Base = declarative_base()
+from sqlalchemy.sql import func
+from src.database.connection import Base
 
 class TransactionAudit(Base):
     __tablename__ = "transaction_audit"
@@ -22,3 +21,15 @@ class TransactionAudit(Base):
     # Context
     customer_id = Column(String, index=True)
     type = Column(String)  # TRANSFER, CASH_OUT, etc.
+
+class PredictionLog(Base):
+    __tablename__ = "prediction_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    amount = Column(Float)
+    old_balance = Column(Float)
+    new_balance = Column(Float)
+    verdict = Column(String)  # "FLAGGED" or "APPROVED"
+    probability = Column(Float)
+    is_fraud = Column(Boolean)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())

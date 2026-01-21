@@ -1,6 +1,5 @@
-
 services:
-  # The API and ML Engine (Sentinel-Fin)
+  # 1. The API and ML Engine
   api:
     build: .
     container_name: sentinel_api
@@ -11,15 +10,35 @@ services:
     env_file:
       - .env
     environment:
-      # This ensures the Python code sees the host variable
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_HOST=${POSTGRES_HOST}
+      - HF_TOKEN=${HF_TOKEN}
     depends_on:
       db:
         condition: service_healthy
     networks:
       - sentinel_network
 
-  # The Audit Log Database (PostgreSQL)
+  # 2. NEW: The Sentinel Dashboard (Frontend)
+  frontend:
+    build: .
+    container_name: sentinel_frontend
+    volumes:
+      - .:/app
+    # We override the default command to start Streamlit
+    command: streamlit run src/frontend/dashboard.py --server.port=8501 --server.address=0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      - BACKEND_URL=http://api:8000
+    depends_on:
+      - api
+    networks:
+      - sentinel_network
+
+  # 3. The Audit Log Database
   db:
     image: postgres:15-alpine
     container_name: sentinel_db
@@ -39,7 +58,7 @@ services:
     networks:
       - sentinel_network
 
-  # Local AI Model Server (Ollama)
+  # 4. Local AI Model Server
   ollama:
     image: ollama/ollama:latest
     container_name: sentinel_ollama
