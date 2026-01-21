@@ -20,7 +20,7 @@ numpy<2.0.0
 
 # --- Explainability (The "Why" for Regulators) ---
 shap==0.46.*
-matplotlib==3.10.
+matplotlib==3.10.0
 pytest==8.3.*
 httpx==0.28.*
 
