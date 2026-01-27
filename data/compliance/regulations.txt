@@ -1,13 +1,15 @@
 SENTINEL-FIN REGULATORY FRAMEWORK v2026.1
 
 SECTION A: BALANCE ANOMALIES (RULE-101)
-- Flag "Account Depletion": Any transaction that reduces the originating account balance by more than 99% in a single event.
+- Flag "Account Depletion": Any transaction that reduces the originating account balance by more than 90% in a single event.
 - Flag "Initial Balance Mismatch": Transactions where the 'amount' and 'oldbalanceOrg' are identical, suggesting a total sweep of funds.
+- Indicators: A 'newbalanceOrig' of zero is a primary indicator of unauthorized takeover or total fund liquidation.
 
 SECTION B: TRANSACTION BEHAVIOR (RULE-202)
-- High Risk: Transfer type transactions (encoded 4) that occur in a single burst exceeding $50,000.
-- Suspicious: Cash-out events immediately following a large transfer.
+- High Risk: TRANSFER type transactions (encoded 4) that occur in a single burst exceeding $50,000.
+- Suspicious: CASH_OUT events (encoded 1) following a large transfer or resulting in total account depletion.
+- AML Pattern Recognition: High-ratio account depletion via TRANSFER or CASH_OUT must be flagged as potential layering or integration phases of money laundering.
 
 SECTION C: REPORTING MANDATE
-- All Rule-101 violations require a "Mandatory SAR Filing" (Suspicious Activity Report).
-- The auditor must verify if the 'newbalanceOrig' is zero, as this is a primary indicator of unauthorized takeover.
+- All Rule-101 and Rule-202 violations require a "Mandatory SAR Filing" (Suspicious Activity Report).
+- Auditors must justify flags by referencing the balance depletion ratio and the transaction type.
