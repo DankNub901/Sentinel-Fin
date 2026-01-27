@@ -23,9 +23,13 @@ class ComplianceReporter:
         You are a Financial Compliance Auditor. 
         Referencing these regulations: {regulations}
         
-        A transaction was flagged for: {factors}
+        A transaction was flagged for the following reasons: {factors}
         
+        TASK:
         Provide a concise, professional audit justification (max 2 sentences).
+        1. Only reference the specific transaction type and Rule mentioned in the reasons.
+        2. Do not include rules or transaction types from the framework that are not relevant to this specific flag.
+        3. Explicitly cite the Section or Rule ID (e.g., Rule-101) in your response.
         [/INST]
         """
         

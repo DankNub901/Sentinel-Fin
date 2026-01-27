@@ -13,6 +13,14 @@ from src.engine.loader import get_model
 # 1. Setup the Model & Explainer Container
 ml_components = {}
 
+TRANSACTION_TYPES = {
+    "CASH_IN": 0,
+    "CASH_OUT": 1,
+    "DEBIT": 2,
+    "PAYMENT": 3,
+    "TRANSFER": 4
+}
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load model once on startup
@@ -43,7 +51,7 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
     if not ml_components.get("fraud_detector"):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    # Feature Engineering
+    # 1. Feature Engineering
     error_balance = data.newbalanceOrig + data.amount - data.oldbalanceOrg
     input_data = pd.DataFrame([{
         "amount": data.amount, 
@@ -53,21 +61,37 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
         "type_encoded": data.type_encoded
     }])
 
-    # AI Prediction
+    # 2. AI Prediction (Base Model)
     model = ml_components["fraud_detector"]
     prediction = model.predict(input_data)[0]
-    probability = model.predict_proba(input_data)[0][1]
-    verdict = "FLAGGED" if prediction else "APPROVED"
+    probability = float(model.predict_proba(input_data)[0][1])
 
-    # NEW: SHAP Explainability (Why did it flag?)
+    # 3. NEW: AML & HEURISTIC GUARDRAILS
+    # These catch "Common Sense" fraud that the ML model might miss
     reasoning = []
-    if probability > 0.1:  # Explain anything with even a small risk
+    drain_ratio = data.amount / data.oldbalanceOrg if data.oldbalanceOrg > 0 else 0
+    
+    # Account Drain Check
+    if data.amount > 1000 and drain_ratio > 0.90:
+        prediction = 1  # Force the flag
+        probability = max(probability, 0.95)  # Ensure high confidence for the auditor
+        reasoning.append(f"Heuristic Alert: Account Drain Detected ({drain_ratio:.2%} depletion)")
+
+        # TRANSFER: Flag reason (Layering)
+        if data.type_encoded == TRANSACTION_TYPES["TRANSFER"]:
+            reasoning.append("AML Warning: Possible 'Layering' activity. Rapid fund shifting to external account detected.")
+            reasoning.append("High risk of 'Pass-through' behavior; source of funds may be obscured.")
+        
+        #CASH_OUT: Flag reason (Integration)
+        elif data.type_encoded == TRANSACTION_TYPES["CASH_OUT"]:
+            reasoning.append("AML Warning: Possible 'Integration' phase. High-value liquidation of funds to untraceable cash.")
+
+    # 4. SHAP Explainability (Existing Logic)
+    # We keep this to explain the AI's "internal thoughts" alongside our manual rules
+    if probability > 0.1:
         explainer = ml_components["explainer"]
         shap_values = explainer.shap_values(input_data)
-        
-        # Get feature impacts and sort them
         feature_names = input_data.columns
-        # For binary classification, shap_values[0] is the vector of impacts
         impacts = dict(zip(feature_names, shap_values[0]))
         
         # Sort by absolute impact (top 3)
@@ -75,15 +99,18 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
         
         for feat, val in top_features:
             direction = "increased" if val > 0 else "decreased"
-            reasoning.append(f"{feat} {direction} risk score")
+            reasoning.append(f"AI Factor: {feat} {direction} risk score")
 
-    # Save to Database
+    # 5. Final Verdict Determination
+    verdict = "FLAGGED" if prediction else "APPROVED"
+
+    # 6. Save to Database
     new_log = models.PredictionLog(
         amount=data.amount,
         old_balance=data.oldbalanceOrg,
         new_balance=data.newbalanceOrig,
         verdict=verdict,
-        probability=float(probability),
+        probability=probability,
         is_fraud=bool(prediction)
     )
     db.add(new_log)
@@ -92,7 +119,7 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
 
     return {
         "is_fraud": bool(prediction),
-        "fraud_probability": round(float(probability), 4),
+        "fraud_probability": round(probability, 4),
         "verdict": verdict,
         "reasoning": reasoning,
         "log_id": new_log.id
