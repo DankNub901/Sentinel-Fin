@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 
 from src.database.connection import engine, get_db
 from src.database import models
-from src.ml.loader import get_model
+from src.engine.loader import get_model
 
 # 1. Setup the Model & Explainer Container
 ml_components = {}
@@ -104,10 +104,21 @@ def get_analytics(db: Session = Depends(get_db)):
     total_flagged = db.query(models.PredictionLog).filter(models.PredictionLog.verdict == "FLAGGED").count()
     avg_prob = db.query(func.avg(models.PredictionLog.probability)).scalar() or 0
     
-    recent_threats = db.query(models.PredictionLog)\
+    # Get the 5 most recent threats
+    threats = db.query(models.PredictionLog)\
         .filter(models.PredictionLog.verdict == "FLAGGED")\
         .order_by(models.PredictionLog.timestamp.desc())\
         .limit(5).all()
+
+    # Manual conversion to dict to ensure Streamlit can read it
+    recent_threats_list = []
+    for t in threats:
+        recent_threats_list.append({
+            "id": t.id,
+            "amount": t.amount,
+            "probability": f"{t.probability:.2%}",
+            "timestamp": t.timestamp.strftime("%Y-%m-%d %H:%M") 
+        })
 
     return {
         "metrics": {
@@ -116,5 +127,5 @@ def get_analytics(db: Session = Depends(get_db)):
             "fraud_rate": f"{(total_flagged / total_processed * 100):.2f}%" if total_processed > 0 else "0%",
             "avg_confidence": f"{avg_prob:.2%}"
         },
-        "recent_threats": recent_threats
+        "recent_threats": recent_threats_list
     }
