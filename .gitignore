@@ -10,5 +10,8 @@ __pycache__/
 src/ml/*.pkl
 .vscode/
 data/**/*.csv
-
+data/db/
+ollama_storage/
+venv/
+.DS_Store
 *.pkl

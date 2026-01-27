@@ -10,6 +10,7 @@ services:
     env_file:
       - .env
     environment:
+      - PYTHONPATH=/app
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}
@@ -68,9 +69,11 @@ services:
       - "11434:11434"
     networks:
       - sentinel_network
+    restart: always
 
 networks:
   sentinel_network:
+    name: sentinel_network
     driver: bridge
 
 volumes:
