@@ -12,6 +12,8 @@ st.title("🛡️ Sentinel-Fin: Fraud Command Center")
 
 # Sidebar for manual prediction
 st.sidebar.header("Test New Transaction")
+name_orig = st.sidebar.text_input("Sender Name", value="C_USER_1")
+name_dest = st.sidebar.text_input("Recipient Name", value="M_MERCH_1")
 amount = st.sidebar.number_input("Amount", min_value=0.0)
 old_bal = st.sidebar.number_input("Old Balance", min_value=0.0)
 new_bal = st.sidebar.number_input("New Balance", min_value=0.0)
@@ -24,7 +26,9 @@ if st.sidebar.button("Scan Transaction"):
         "amount": amount,
         "oldbalanceOrg": old_bal,
         "newbalanceOrig": new_bal,
-        "type_encoded": type_map[t_type]
+        "type_encoded": type_map[t_type],
+        "nameOrig": name_orig,
+        "nameDest": name_dest 
     }
     try:
         res = requests.post(f"{BACKEND_URL}/predict", json=payload).json()
@@ -90,7 +94,7 @@ try:
         st.subheader("Recent Flagged Threats")
         if data.get("recent_threats"):
             df = pd.DataFrame(data["recent_threats"])
-            st.dataframe(df[["id", "amount", "probability", "timestamp"]], use_container_width=True)
+            st.dataframe(df[["id", "sender", "receiver", "amount", "probability", "timestamp"]], use_container_width=True)
         else:
             st.info("No threats detected yet. System is clear.")
     else:

@@ -26,10 +26,20 @@ class PredictionLog(Base):
     __tablename__ = "prediction_logs"
 
     id = Column(Integer, primary_key=True, index=True)
+    
     amount = Column(Float)
     old_balance = Column(Float)
     new_balance = Column(Float)
+
+    name_orig = Column(String)  # Sender (e.g., C12345)
+    name_dest = Column(String)  # Receiver (e.g., M67890)
+
     verdict = Column(String)  # "FLAGGED" or "APPROVED"
     probability = Column(Float)
     is_fraud = Column(Boolean)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+    status = Column(String, default="PENDING")  # To track "RESOLVED", "DISMISSED", etc.
+    shap_summary = Column(JSON)                 # To store the SHAP math data
+    reviewer_notes = Column(String)             # To store Llama 3 reports or human notes
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
