@@ -1,70 +1,44 @@
-import requests
-import time
-import random
-from mimesis import Finance, Person
+import pandas as pd
+import httpx
+import asyncio
+import os
 
 # Configuration
-# Note: Use 'api' if running inside Docker, or 'localhost' if running the script directly on WSL
-API_URL = "http://api:8000/predict" 
-finance = Finance()
-person = Person()
+API_URL = os.getenv("API_URL", "http://api:8000/predict/batch")
+CSV_FILE = "/app/data/simulation/simulation_ready_for_redis.csv"
+BATCH_SIZE = 50
+VELOCITY = float(os.getenv("VELOCITY", 1.0))
 
-def generate_transaction():
-    """Generates a mix of normal and suspicious financial behavior."""
-    
-    # 15% chance to generate a 'Targeted Attack' profile
-    is_attack = random.random() < 0.15
-    
-    # Randomly pick a transaction type (CASH_OUT=1, TRANSFER=4)
-    tx_type = random.choice([1, 4])
-    
-    # Generate realistic balances
-    old_balance = float(finance.price(minimum=500, maximum=50000))
-    
-    if is_attack:
-        # ATTACK: High-velocity drain (90% of account balance)
-        amount = old_balance * random.uniform(0.90, 0.99)
-    else:
-        # NORMAL: Casual spending (1% to 20% of account balance)
-        amount = old_balance * random.uniform(0.01, 0.20)
-
-    payload = {
-        "step": random.randint(1, 744), # Simulation hour
-        "type_encoded": tx_type,
-        "amount": round(amount, 2),
-        "oldbalanceOrg": round(old_balance, 2),
-        "newbalanceOrig": round(old_balance - amount, 2)
-    }
-    
-    return payload
-
-def start_stress_test(velocity=2.0):
-    """
-    velocity: Seconds to wait between transactions.
-    """
-    print(f"🔥 Starting Sentinel Stress Test Engine...")
-    print(f"📡 Target API: {API_URL}")
-    print(f"⏱️ Velocity: {velocity}s per transaction\n")
-
+async def send_batch(client, batch_data, batch_num):
     try:
-        while True:
-            tx_data = generate_transaction()
+        response = await client.post(API_URL, json=batch_data, timeout=10.0)
+        if response.status_code == 200:
+            result = response.json()
+            print(f"✅ Batch {batch_num} | Flags: {result['flags_detected']}")
+        else:
+            print(f"❌ API Error: {response.status_code}")
+    except Exception as e:
+        print(f"⚠️ Connection Error: {e}")
+
+async def run_simulation():
+    if not os.path.exists(CSV_FILE):
+        print(f"❌ Error: {CSV_FILE} not found.")
+        return
+
+    df = pd.read_csv(CSV_FILE)
+    type_map = {"CASH_IN": 0, "CASH_OUT": 1, "DEBIT": 2, "PAYMENT": 3, "TRANSFER": 4}
+    df['type_encoded'] = df['type'].map(type_map)
+
+    print(f"🚀 Sentinel-Fin: Starting Async Simulation...")
+
+    async with httpx.AsyncClient() as client:
+        for i in range(0, len(df), BATCH_SIZE):
+            chunk = df.iloc[i : i + BATCH_SIZE]
+            batch_data = {"transactions": chunk.to_dict(orient='records')}
             
-            try:
-                response = requests.post(API_URL, json=tx_data, timeout=5)
-                result = response.json()
-                
-                status_icon = "🚨" if result.get("verdict") == "FLAGGED" else "✅"
-                print(f"{status_icon} [Sent] ${tx_data['amount']:>8} | [Result] {result.get('verdict'):<8} | [Prob] {result.get('probability'):.2f}")
-                
-            except requests.exceptions.RequestException as e:
-                print(f"❌ API Connection Error: {e}")
-            
-            time.sleep(velocity)
-            
-    except KeyboardInterrupt:
-        print("\n🛑 Stress test stopped by user.")
+            # Fire and wait (respecting the velocity/delay)
+            await send_batch(client, batch_data, i//BATCH_SIZE + 1)
+            await asyncio.sleep(VELOCITY)
 
 if __name__ == "__main__":
-    # You can change the velocity here (e.g., 0.1 for high-speed stress testing)
-    start_stress_test(velocity=1.5)
+    asyncio.run(run_simulation())

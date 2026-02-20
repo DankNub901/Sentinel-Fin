@@ -27,19 +27,29 @@ class PredictionLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     
+    # --- Transaction Data ---
     amount = Column(Float)
     old_balance = Column(Float)
     new_balance = Column(Float)
+    # New Field: To store what the balance SHOULD have been (Fix #2 in your checklist)
+    expected_new_balance = Column(Float) 
 
-    name_orig = Column(String)  # Sender (e.g., C12345)
-    name_dest = Column(String)  # Receiver (e.g., M67890)
+    name_orig = Column(String)
+    name_dest = Column(String)
+    type_code = Column(Integer) # For the position-based XGBoost requirement
 
-    verdict = Column(String)  # "FLAGGED" or "APPROVED"
+    # --- Simulation Tracking (Objective Fix) ---
+    is_simulated = Column(Boolean, default=False, index=True)
+    session_id = Column(String, nullable=True, index=True) # UUID or "GAN_TEST_01"
+
+    # --- ML Results ---
+    verdict = Column(String)
     probability = Column(Float)
     is_fraud = Column(Boolean)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
 
-    status = Column(String, default="PENDING")  # To track "RESOLVED", "DISMISSED", etc.
-    shap_summary = Column(JSON)                 # To store the SHAP math data
-    reviewer_notes = Column(String)             # To store Llama 3 reports or human notes
+    # --- Metadata & Logic ---
+    status = Column(String, default="PENDING")
+    shap_summary = Column(JSON)
+    reviewer_notes = Column(String)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())

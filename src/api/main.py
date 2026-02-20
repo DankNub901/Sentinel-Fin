@@ -6,6 +6,7 @@ import pandas as pd
 import shap
 import json
 from contextlib import asynccontextmanager
+from typing import List
 
 from src.database.connection import engine, get_db
 from src.database import models
@@ -40,6 +41,8 @@ class Transaction(BaseModel):
     type_encoded: int
     nameOrig: str = "Unknown" 
     nameDest: str = "Unknown" 
+    is_simulated: bool = False
+    session_id: str = None
 
 # 3. Initialize App
 models.Base.metadata.create_all(bind=engine)
@@ -53,6 +56,9 @@ def health_check():
 async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
     if not ml_components.get("fraud_detector"):
         raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    expected_new = data.oldbalanceOrg - data.amount
+    error_balance = data.newbalanceOrig - expected_new
 
     # 1. Feature Engineering
     error_balance = data.newbalanceOrig + data.amount - data.oldbalanceOrg
@@ -113,14 +119,17 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
         amount=data.amount,
         old_balance=data.oldbalanceOrg,
         new_balance=data.newbalanceOrig,
+        expected_new_balance=expected_new, # Track the math fix
+        type_code=data.type_encoded,        # Track the raw position
         name_orig=data.nameOrig,
         name_dest=data.nameDest,
-        verdict=verdict,
+        is_simulated=data.is_simulated,     # Track if it's a bot
+        session_id=data.session_id,         # Group the simulation
+        verdict="FLAGGED" if prediction else "APPROVED",
         probability=probability,
         is_fraud=bool(prediction),
-        status="PENDING",
-        shap_summary=shap_data,   # Raw math data for later use
-        reviewer_notes=None
+        shap_summary=shap_data,
+        status="PENDING"
     )
     db.add(new_log)
     db.commit()
@@ -133,6 +142,81 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
         "reasoning": reasoning,
         "log_id": new_log.id
     }
+
+# --- 1. Update Schema ---
+class TransactionBatch(BaseModel):
+    transactions: List[Transaction]
+
+# --- 2. Add the Batch Endpoint ---
+@app.post("/predict/batch")
+async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
+    if not ml_components.get("fraud_detector"):
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
+    # A. Efficiently convert Pydantic list to a single DataFrame
+    df_batch = pd.DataFrame([t.model_dump() for t in batch.transactions])
+    
+    # B. Vectorized Feature Engineering (Faster than a loop!)
+    df_batch['expected_new'] = df_batch['oldbalanceOrg'] - df_batch['amount']
+    df_batch['errorBalanceOrig'] = df_batch['newbalanceOrig'] - df_batch['expected_new']
+    
+    # Prepare data for model (keep only the columns the model was trained on)
+    input_features = df_batch[["amount", "oldbalanceOrg", "newbalanceOrig", "errorBalanceOrig", "type_encoded"]]
+
+    # C. Batch AI Prediction
+    model = ml_components["fraud_detector"]
+    batch_preds = model.predict(input_features)
+    batch_probs = model.predict_proba(input_features)[:, 1]
+
+    # D. Batch SHAP Explanations
+    explainer = ml_components["explainer"]
+    # We calculate SHAP for the whole batch at once
+    shap_values_batch = explainer.shap_values(input_features)
+    feature_names = input_features.columns
+
+    # E. Process Results and Save to DB
+    new_logs = []
+    for i in range(len(df_batch)):
+        # Calculate Heuristic/AML logic per row
+        row = df_batch.iloc[i]
+        prob = float(batch_probs[i])
+        pred = int(batch_preds[i])
+        
+        # AML Guardrail (Manual override logic)
+        drain_ratio = row['amount'] / row['oldbalanceOrg'] if row['oldbalanceOrg'] > 0 else 0
+        if row['amount'] > 1000 and drain_ratio > 0.90:
+            pred = 1
+            prob = max(prob, 0.95)
+
+        # Extract SHAP for this specific row
+        impacts = dict(zip(feature_names, shap_values_batch[i]))
+        shap_json = {k: float(v) for k, v in impacts.items()}
+
+        # Create Log Object
+        new_logs.append(models.PredictionLog(
+            amount=float(row['amount']),
+            old_balance=float(row['oldbalanceOrg']),
+            new_balance=float(row['newbalanceOrig']),
+            expected_new_balance=float(row['expected_new']),
+            type_code=int(row['type_encoded']),
+            name_orig=row['nameOrig'],
+            name_dest=row['nameDest'],
+            is_simulated=bool(row.get('is_simulated', True)), # Assume True for batch
+            session_id=row.get('session_id'),
+            verdict="FLAGGED" if int(batch_preds[i]) else "APPROVED",
+            probability=float(batch_probs[i]),
+            is_fraud=bool(batch_preds[i]),
+            shap_summary={k: float(v) for k, v in dict(zip(feature_names, shap_values_batch[i])).items()}
+        ))
+
+    # F. Bulk Save to Postgres (The real speed boost)
+    db.add_all(new_logs)
+    db.commit()
+
+    return {
+        "processed": len(new_logs), 
+        "flags": sum(1 for l in new_logs if l.is_fraud)
+        }
 
 @app.get("/api/v1/analytics")
 def get_analytics(db: Session = Depends(get_db)):
