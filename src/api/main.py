@@ -151,26 +151,6 @@ class TransactionBatch(BaseModel):
 # --- 2. Add the Batch Endpoint ---
 @app.post("/predict/batch")
 async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
-    """
-    Perform batch fraud detection predictions on a collection of transactions.
-    This endpoint processes a batch of transactions through the fraud detection ML pipeline,
-    applying vectorized feature engineering, generating predictions with confidence scores,
-    and creating explainability outputs via SHAP values. Results are persisted to the database
-    with AML heuristic overrides applied.
-    Args:
-        batch (TransactionBatch): A batch object containing a list of transactions to predict.
-        db (Session): SQLAlchemy database session dependency for persisting prediction logs.
-    Returns:
-        dict: A summary dictionary containing:
-            - "processed" (int): Total number of transactions processed.
-            - "flags" (int): Count of transactions flagged as fraudulent.
-    Raises:
-        HTTPException: 503 Service Unavailable if the fraud detection model is not loaded.
-    Process Flow:
-        A. Converts Pydantic transaction models to a pandas DataFrame for efficient batch processing.
-        B. Performs vectorized feature engineering (balance difference calculations).
-        C. Executes batch predictions using the loaded ML model and computes fraud probabilities.
-        D. Generates SHAP feature importance values for the entire batch at once.
     if not ml_components.get("fraud_detector"):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -182,7 +162,7 @@ async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
     df_batch['errorBalanceOrig'] = df_batch['newbalanceOrig'] - df_batch['expected_new']
     
     # Prepare data for model (keep only the columns the model was trained on)
-    input_features = df_batch[[FEATURES]]
+    input_features = df_batch[FEATURES]
 
     # C. Batch AI Prediction
     model = ml_components["fraud_detector"]
