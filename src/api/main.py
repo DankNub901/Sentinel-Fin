@@ -12,16 +12,18 @@ from src.database.connection import engine, get_db
 from src.database import models
 from src.engine.loader import get_model
 
+from src.constants import (
+    FEATURES, 
+    TRANSACTION_TYPES, 
+    API_TITLE, 
+    SYSTEM_NAME,
+    HEURISTIC_AMOUNT_LIMIT,
+    HEURISTIC_DRAIN_RATIO
+)
+
 # 1. Setup the Model & Explainer Container
 ml_components = {}
 
-TRANSACTION_TYPES = {
-    "CASH_IN": 0,
-    "CASH_OUT": 1,
-    "DEBIT": 2,
-    "PAYMENT": 3,
-    "TRANSFER": 4
-}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -46,11 +48,11 @@ class Transaction(BaseModel):
 
 # 3. Initialize App
 models.Base.metadata.create_all(bind=engine)
-app = FastAPI(title="Sentinel-Fin API", lifespan=lifespan)
+app = FastAPI(title=API_TITLE, lifespan=lifespan)
 
 @app.get("/")
 def health_check():
-    return {"status": "active", "system": "Sentinel-Fin Fraud Engine"}
+    return {"status": "active", "system": SYSTEM_NAME}
 
 @app.post("/predict")
 async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
@@ -61,14 +63,13 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
     error_balance = data.newbalanceOrig - expected_new
 
     # 1. Feature Engineering
-    error_balance = data.newbalanceOrig + data.amount - data.oldbalanceOrg
     input_data = pd.DataFrame([{
         "amount": data.amount, 
         "oldbalanceOrg": data.oldbalanceOrg,
         "newbalanceOrig": data.newbalanceOrig, 
         "errorBalanceOrig": error_balance,
         "type_encoded": data.type_encoded
-    }])
+    }])[FEATURES]
 
     # 2. AI Prediction (Base Model)
     model = ml_components["fraud_detector"]
@@ -81,7 +82,7 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
     drain_ratio = data.amount / data.oldbalanceOrg if data.oldbalanceOrg > 0 else 0
     
     # Account Drain Check
-    if data.amount > 1000 and drain_ratio > 0.90:
+    if data.amount > HEURISTIC_AMOUNT_LIMIT and drain_ratio > HEURISTIC_DRAIN_RATIO:
         prediction = 1  # Force the flag
         probability = max(probability, 0.95)  # Ensure high confidence for the auditor
         reasoning.append(f"Heuristic Alert: Account Drain Detected ({drain_ratio:.2%} depletion)")
@@ -150,18 +151,38 @@ class TransactionBatch(BaseModel):
 # --- 2. Add the Batch Endpoint ---
 @app.post("/predict/batch")
 async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
+    """
+    Perform batch fraud detection predictions on a collection of transactions.
+    This endpoint processes a batch of transactions through the fraud detection ML pipeline,
+    applying vectorized feature engineering, generating predictions with confidence scores,
+    and creating explainability outputs via SHAP values. Results are persisted to the database
+    with AML heuristic overrides applied.
+    Args:
+        batch (TransactionBatch): A batch object containing a list of transactions to predict.
+        db (Session): SQLAlchemy database session dependency for persisting prediction logs.
+    Returns:
+        dict: A summary dictionary containing:
+            - "processed" (int): Total number of transactions processed.
+            - "flags" (int): Count of transactions flagged as fraudulent.
+    Raises:
+        HTTPException: 503 Service Unavailable if the fraud detection model is not loaded.
+    Process Flow:
+        A. Converts Pydantic transaction models to a pandas DataFrame for efficient batch processing.
+        B. Performs vectorized feature engineering (balance difference calculations).
+        C. Executes batch predictions using the loaded ML model and computes fraud probabilities.
+        D. Generates SHAP feature importance values for the entire batch at once.
     if not ml_components.get("fraud_detector"):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     # A. Efficiently convert Pydantic list to a single DataFrame
     df_batch = pd.DataFrame([t.model_dump() for t in batch.transactions])
     
-    # B. Vectorized Feature Engineering (Faster than a loop!)
+    # B. Vectorized Feature Engineering
     df_batch['expected_new'] = df_batch['oldbalanceOrg'] - df_batch['amount']
     df_batch['errorBalanceOrig'] = df_batch['newbalanceOrig'] - df_batch['expected_new']
     
     # Prepare data for model (keep only the columns the model was trained on)
-    input_features = df_batch[["amount", "oldbalanceOrg", "newbalanceOrig", "errorBalanceOrig", "type_encoded"]]
+    input_features = df_batch[[FEATURES]]
 
     # C. Batch AI Prediction
     model = ml_components["fraud_detector"]
@@ -179,14 +200,14 @@ async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
     for i in range(len(df_batch)):
         # Calculate Heuristic/AML logic per row
         row = df_batch.iloc[i]
-        prob = float(batch_probs[i])
-        pred = int(batch_preds[i])
+        current_prob = float(batch_probs[i])
+        current_pred = int(batch_preds[i])
         
         # AML Guardrail (Manual override logic)
         drain_ratio = row['amount'] / row['oldbalanceOrg'] if row['oldbalanceOrg'] > 0 else 0
-        if row['amount'] > 1000 and drain_ratio > 0.90:
-            pred = 1
-            prob = max(prob, 0.95)
+        if row['amount'] > HEURISTIC_AMOUNT_LIMIT and drain_ratio > HEURISTIC_DRAIN_RATIO:
+            current_pred = 1
+            current_prob = max(current_prob, 0.95)
 
         # Extract SHAP for this specific row
         impacts = dict(zip(feature_names, shap_values_batch[i]))
@@ -199,14 +220,15 @@ async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
             new_balance=float(row['newbalanceOrig']),
             expected_new_balance=float(row['expected_new']),
             type_code=int(row['type_encoded']),
-            name_orig=row['nameOrig'],
-            name_dest=row['nameDest'],
+            name_orig=row.get('nameOrig', "Unknown"),
+            name_dest=row.get('nameDest', "Unknown"),
             is_simulated=bool(row.get('is_simulated', True)), # Assume True for batch
             session_id=row.get('session_id'),
-            verdict="FLAGGED" if int(batch_preds[i]) else "APPROVED",
-            probability=float(batch_probs[i]),
-            is_fraud=bool(batch_preds[i]),
-            shap_summary={k: float(v) for k, v in dict(zip(feature_names, shap_values_batch[i])).items()}
+            verdict="FLAGGED" if current_pred else "APPROVED",
+            probability=current_prob,
+            is_fraud=bool(current_pred),
+            status = "PENDING",
+            shap_summary=shap_json
         ))
 
     # F. Bulk Save to Postgres (The real speed boost)
