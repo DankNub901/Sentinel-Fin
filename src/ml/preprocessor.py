@@ -1,19 +1,17 @@
 import pandas as pd
-from sklearn.preprocessing import LabelEncoder
+from src.constants import TRANSACTION_TYPES
 
 def clean_data(file_path):
     print(f"Reading data from {file_path}...")
     df = pd.read_csv(file_path)
     
-    # Filter for high-risk transaction types
-    df = df[df['type'].isin(['TRANSFER', 'CASH_OUT'])]
+    df = df[df['type'].isin(TRANSACTION_TYPES.keys())]
     
-    # Feature Engineering: Catching balance discrepancies
-    df['errorBalanceOrig'] = df['newbalanceOrig'] + df['amount'] - df['oldbalanceOrg']
-    df['errorBalanceDest'] = df['oldbalanceDest'] + df['amount'] - df['newbalanceDest']
+    # Feature Engineering: Fixing balance discrepancies (consistency fix)
+    df['expected_new'] = df['oldbalanceOrg'] - df['amount']
+    df['errorBalanceOrig'] = df['newbalanceOrig'] - df['expected_new']
     
-    # Encode 'type' as numbers (TRANSFER=0, CASH_OUT=1, etc.)
-    le = LabelEncoder()
-    df['type_encoded'] = le.fit_transform(df['type'])
+    # mapping types from constants.py
+    df['type_encoded'] = df['type'].map(TRANSACTION_TYPES)
     
-    return df, le
+    return df
