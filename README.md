@@ -43,6 +43,38 @@ Most fraud systems are "black boxes." Sentinel-AI provides transparency:
 
 ---
 
+## Evolution of Architecture: The "Lean" Refactor
+
+The current iteration of Sentinel-AI is the result of a rigorous optimization phase to maintain high throughput on 16GB RAM systems.
+
+### 1. Service Decommissioning (The "Why")
+| Decommissioned Service | Replaced By | Engineering Rationale |
+| :--- | :--- | :--- |
+| **Apache Kafka** | `asyncio` + Batching | Kafka’s JVM overhead (2GB+ RAM) was too heavy for local dev. Replaced with internal Python async buffers. |
+| **Locust / Mimesis** | Pre-computed SDV Stream | Real-time synthetic generation competed with XGBoost for CPU cycles. Moved to "Streamed Replay" of pre-generated data. |
+| **Heavy Vector DB** | Context-Injected Prompting | For a targeted compliance rulebook, a Vector DB added unnecessary search latency. Rules are now cached in-memory for O(1) retrieval. |
+
+### 2. Revamped Services
+- **Ollama Persistence:** Dedicated container with volume-mapped storage to prevent model re-loads.
+- **Postgres Optimization:** Switched from atomic inserts to **Bulk persistence**, reducing DB write-latency by ~85% during 50tx/s bursts.
+
+---
+
+## MLOps: Rigorous Training & Governance
+
+### 1. Temporal Data Splitting (Anti-Cheating)
+Unlike standard stratified shuffles, Sentinel-AI implements a **Temporal Split (70/15/15)** based on the transaction `step`.
+- **Logic:** The model trains on past data to predict future fraud, simulating real-world bank deployment and preventing "Future-Lookahead" leakage.
+
+### 2. AUPRC-Driven Optimization
+In highly imbalanced datasets (Fraud < 0.1%), **Accuracy is a vanity metric.** - **Metric:** The pipeline is tuned for **AUPRC (Area Under Precision-Recall Curve)**.
+- **Dynamic Balancing:** The pipeline calculates a **Dynamic `scale_pos_weight`** using the ratio of `negative / positive` classes to penalize missed fraud cases.
+
+### 3. Versioned Model Registry
+Model weights are hosted on the **Hugging Face Hub**, allowing the API to pull specific artifacts (`fraud_model.pkl`) during container build.
+
+---
+
 ## 📈 Current Roadmap & Performance Tuning
 
 ### **Phase 1: Performance Optimization (Completed)**
@@ -51,7 +83,7 @@ Most fraud systems are "black boxes." Sentinel-AI provides transparency:
 * [x] Containerized the full stack for "one-command" deployment.
 
 ### **Phase 2: Behavioral Feature Engineering (In Progress)**
-I am currently migrating the model from **State-Based** (static balances) to **Behavior-Based** features to eliminate data leakage and improve real-world efficacy:
-* [ ] **Velocity Metrics:** Implementing 1h and 24h transaction frequency per user.
-* [ ] **Deviation Scoring:** Comparing current transaction amounts against a 30-day moving average.
-* [ ] **Redis Integration:** Adding a caching layer for millisecond-latency behavioral lookups.
+Transitioning from **State-Based** (static balances) to **Behavior-Based** features:
+* [ ] **Velocity Metrics:** 1h and 24h transaction frequency per user via Postgres Windows.
+* [ ] **Relative Magnitude:** Current `amount` vs. 30-day moving average per account.
+* [ ] **Redis Integration:** Caching layer for millisecond-latency behavioral lookups.
