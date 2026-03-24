@@ -6,10 +6,41 @@
 ## Key Innovation: Resource-Aware Engineering
 Designed to run on consumer-grade hardware (Intel Iris Xe), the system utilizes **Vectorized Batching** and **Asynchronous I/O** to maintain a throughput of 50 transactions/second while simultaneously running a local Llama 3 model for explainable AI (XAI).
 
+## 🗺️ System Architecture
 
+Sentinel-AI is orchestrated as a decoupled microservices stack. The following diagram illustrates the lifecycle of a transaction from ingestion to automated auditing.
 
+```mermaid
+graph TD
+    subgraph "Data Ingestion Layer"
+        A[Streamlit Dashboard] -->|Manual Entry| B(FastAPI Gateway)
+        S[Async Simulation] -->|Batch 50tx/s| B
+    end
+
+    subgraph "Inference & Logic Layer"
+        B --> C{XGBoost Model}
+        C -->|Approved| D[(PostgreSQL Log)]
+        C -->|Flagged| E[Trigger Audit]
+    end
+
+    subgraph "Explainable AI (XAI) & RAG"
+        E --> F[SHAP TreeExplainer]
+        F --> G[LangChain Orchestrator]
+        H[Regulations.txt] --> G
+        G --> I[Ollama: Llama 3]
+        I -->|Audit Report| D
+    end
+
+    subgraph "Storage & Monitoring"
+        D --> J[SOC Dashboard]
+    end
+
+    %% Styling
+    style C fill:#f96,stroke:#333,stroke-width:2px
+    style I fill:#69f,stroke:#333,stroke-width:2px 
+
+```
 ---
-
 ## Tech Stack & Rationale
 
 | Component | Technology | Engineering Rationale |
