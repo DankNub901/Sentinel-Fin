@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 # extension-module is critical—it tells Rust it's a Python plugin
 pyo3 = { version = "0.20.2", features = ["extension-module"] }
 pyo3-polars = { version = "0.10", features = ["derive"] }
-polars = { version = "1.0", default-features = false, features = [
+polars = { version = "0.36.2", default-features = false, features = [
     "dtype-slim", 
     "strings",
     "fmt", 

@@ -7,8 +7,8 @@ requests
 pandas
 
 # --- Data Engine (The Bridge) ---
-polars>=1.0.0
-pyo3-polars>=0.15.0
+polars
+pyo3-polars
 
 # --- Database & Persistence ---
 sqlalchemy==2.0.*
