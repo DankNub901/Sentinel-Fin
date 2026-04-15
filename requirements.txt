@@ -8,7 +8,6 @@ pandas
 
 # --- Data Engine (The Bridge) ---
 polars
-pyo3-polars
 
 # --- Database & Persistence ---
 sqlalchemy==2.0.*
