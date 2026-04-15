@@ -15,3 +15,10 @@ ollama_storage/
 venv/
 .DS_Store
 *.pkl
+
+
+# --- Rust Build Artifacts (The Bloat) ---
+rust_engine/target/
+rust_engine/dist/
+rust_engine/wheels/
+*.whl
