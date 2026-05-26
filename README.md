@@ -118,3 +118,6 @@ Transitioning from **State-Based** (static balances) to **Behavior-Based** featu
 * [ ] **Velocity Metrics:** 1h and 24h transaction frequency per user via Postgres Windows.
 * [ ] **Relative Magnitude:** Current `amount` vs. 30-day moving average per account.
 * [ ] **Redis Integration:** Caching layer for millisecond-latency behavioral lookups.
+
+## Everything has been Documented
+[Click here to view the Documentation](https://centennialcollegeedu-my.sharepoint.com/:o:/g/personal/ssaranga_my_centennialcollege_ca/IgCsJMpl02TuRakZ6EbKm0nOAbFiQ3ULzg_eWCrhb3pgyok?e=o8THqX)
