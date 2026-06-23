@@ -6,14 +6,24 @@ use std::collections::HashSet;
 // #14: Activity Density
 #[polars_expr(output_type=Float64)]
 fn calc_activity_density(inputs: &[Series]) -> PolarsResult<Series> {
-    let s = &inputs[0];
-    let ca = s.u32()?; 
-    if ca.is_empty() { return Ok(Series::full_null(s.name(), 1, &DataType::Float64)); }
-    let count = ca.len() as f64;
-    let min = ca.min().unwrap_or(0) as f64;
-    let max = ca.max().unwrap_or(0) as f64;
-    let density = count / (max - min + 1e-9);
-    Ok(Float64Chunked::full(s.name(), density, ca.len()).into_series())
+     let s = &inputs[0];
+    let ca = s.u32()?;
+    let mut out = PrimitiveChunkedBuilder::<Float64Type>::new(s.name(), ca.len());
+    
+    let mut min_step = u32::MAX;
+    let mut count = 0.0;
+
+    for step_opt in ca.into_iter() {
+        if let Some(step) = step_opt {
+            if step < min_step { min_step = step; }
+            count += 1.0;
+            let density = count / ((step - min_step) as f64 + 1e-9);
+            out.append_value(density);
+        } else {
+            out.append_null();
+        }
+    }
+    Ok(out.finish().into_series())
 }
 
 // #16: Structuring Flag (New Pair)
@@ -21,11 +31,11 @@ fn calc_activity_density(inputs: &[Series]) -> PolarsResult<Series> {
 fn is_new_pair(inputs: &[Series]) -> PolarsResult<Series> {
     let names_orig = inputs[0].str()?;
     let names_dest = inputs[1].str()?;
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::with_capacity(names_orig.len() / 10);
     let mut out = BooleanChunkedBuilder::new("is_new_pair", names_orig.len());
     for (o, d) in names_orig.into_iter().zip(names_dest.into_iter()) {
         if let (Some(orig), Some(dest)) = (o, d) {
-            let pair = format!("{}_{}", orig, dest);
+            let pair = (orig, dest);
             out.append_value(!seen.contains(&pair));
             seen.insert(pair);
         } else { out.append_null(); }
@@ -41,21 +51,20 @@ fn decayed_velocity(inputs: &[Series]) -> PolarsResult<Series> {
     let mut last_step: u32 = 0;
     
     // Standard Rust Vec: Very stable, avoids Builder-related compilation errors
-    let mut values = Vec::with_capacity(steps.len());
+    let mut out = PrimitiveChunkedBuilder::<Float64Type>::new("decayed_vel", steps.len());
 
     for step_opt in steps.into_iter() {
         if let Some(step) = step_opt {
             let delta_t = (step - last_step) as f64;
             velocity = (velocity * (-0.1 * delta_t).exp()) + 1.0;
-            values.push(Some(velocity));
+            out.append_value(velocity);
             last_step = step;
         } else {
-            values.push(None);
+            out.append_null();
         }
     }
     
-    let out = Float64Chunked::from_iter_options("decayed_vel", values.into_iter());
-    Ok(out.into_series())
+    Ok(out.finish().into_series())
 }
 
 // #15: Similarity Score
@@ -75,6 +84,7 @@ fn get_similarity(inputs: &[Series]) -> PolarsResult<Series> {
 }
 
 #[pymodule]
-fn rust_engine(_py: Python, _m: &PyModule) -> PyResult<()> {
+fn rust_engine(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
