@@ -2,10 +2,21 @@
 # 1. Feature Order: MUST match the XGBoost training column order exactly
 FEATURES = [
     "amount", 
-    "oldbalanceOrg", 
-    "newbalanceOrig", 
-    "errorBalanceOrig", 
-    "type_encoded"
+    "channel_risk",
+    "dest_mule_heat", 
+    "sender_recent_velocity", 
+    "amt_acceleration",
+    "sender_volatility", 
+    "is_new_dest_pair",
+    "personal_amt_z_score", 
+    "late_night_flag", 
+    "hour_sin", 
+    "hour_cos",
+    "global_step_velocity",
+    "is_layering_attempt",
+    "sender_fan_out",
+    "account_activity_density",
+    "time_since_last_tx"
 ]
 
 # 2. Categorical Mapping
