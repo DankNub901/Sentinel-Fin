@@ -10,7 +10,7 @@ from typing import List
 
 from src.database.connection import engine, get_db
 from src.database import models
-from src.engine.loader import get_model
+from src.engine.loader import get_calibrated_model
 
 from src.constants import (
     FEATURES, 
@@ -28,10 +28,14 @@ ml_components = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load model once on startup
-    model = get_model()
+    model, calibrator, features = get_calibrated_model()
+    
+    if not model:
+        print("CRITICAL: Failed to load calibrated fraud brain.")
+    
     ml_components["fraud_detector"] = model
     # Pre-initialize the SHAP explainer (TreeExplainer is fastest for XGBoost)
-    ml_components["explainer"] = shap.TreeExplainer(model)
+    ml_components["explainer"] = shap.Explainer(model.predict_proba, input_features) # or background data
     yield
     ml_components.clear()
 
