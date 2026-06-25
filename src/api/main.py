@@ -3,10 +3,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func  # Added for analytics
 from pydantic import BaseModel
 import pandas as pd
+import numpy as np
 import shap
 import json
 from contextlib import asynccontextmanager
-from typing import List
+from typing import List, Optional
 
 from src.database.connection import engine, get_db
 from src.database import models
@@ -35,24 +36,84 @@ async def lifespan(app: FastAPI):
     
     ml_components["fraud_detector"] = model
     # Pre-initialize the SHAP explainer (TreeExplainer is fastest for XGBoost)
-    ml_components["explainer"] = shap.Explainer(model.predict_proba, input_features) # or background data
+    ml_components["explainer"] = shap.TreeExplainer(model)
     yield
     ml_components.clear()
 
 # 2. Schema
 class Transaction(BaseModel):
+    step: int
+    type: str
     amount: float
-    oldbalanceOrg: float
-    newbalanceOrig: float
-    type_encoded: int
-    nameOrig: str = "Unknown" 
-    nameDest: str = "Unknown" 
+    nameOrig: str
+    nameDest: str
     is_simulated: bool = False
-    session_id: str = None
+    session_id: Optional[str] = None
+    
+    # Allow optional injection of behavioral features (passed by simulation script)
+    channel_risk: Optional[float] = None
+    dest_mule_heat: Optional[float] = None
+    sender_recent_velocity: Optional[float] = None
+    amt_acceleration: Optional[float] = None
+    sender_volatility: Optional[float] = None
+    is_new_dest_pair: Optional[int] = None
+    personal_amt_z_score: Optional[float] = None
+    late_night_flag: Optional[int] = None
+    hour_sin: Optional[float] = None
+    hour_cos: Optional[float] = None
+    global_step_velocity: Optional[float] = None
+    is_layering_attempt: Optional[int] = None
+    sender_fan_out: Optional[int] = None
+    account_activity_density: Optional[float] = None
+    time_since_last_tx: Optional[float] = None
+
+
+
+class TransactionBatch(BaseModel):
+    transactions: List[Transaction]
 
 # 3. Initialize App
 models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title=API_TITLE, lifespan=lifespan)
+
+def build_behavioral_features(tx_dict: dict, db: Session) -> dict:
+    """
+    Enriches raw transaction data with behavioral metrics.
+    If features are not already provided (e.g., Manual Investigator Entry),
+    this function falls back to baseline values or live DB lookups.
+    """
+    # 1. Direct conversions from raw inputs
+    if tx_dict.get("channel_risk") is None:
+        tx_dict["channel_risk"] = 1.0 if tx_dict["type"] in ["TRANSFER", "CASH_OUT"] else 0.0
+        
+    if tx_dict.get("late_night_flag") is None:
+        hour = tx_dict["step"] % 24
+        tx_dict["late_night_flag"] = 1 if hour <= 4 else 0
+        tx_dict["hour_sin"] = float(np.sin(2 * np.pi * hour / 24.0))
+        tx_dict["hour_cos"] = float(np.cos(2 * np.pi * hour / 24.0))
+        
+    if tx_dict.get("is_layering_attempt") is None:
+        tx_dict["is_layering_attempt"] = 1 if tx_dict["nameOrig"] == tx_dict["nameDest"] else 0
+
+    # 2. Historical Fallbacks for Manual Entry (Can be replaced with raw SQL/Redis window functions)
+    defaults = {
+        "dest_mule_heat": 1.0,
+        "sender_recent_velocity": 1.0,
+        "amt_acceleration": 1.0,
+        "sender_volatility": 0.0,
+        "is_new_dest_pair": 1,
+        "personal_amt_z_score": 0.0,
+        "global_step_velocity": 10.0,
+        "sender_fan_out": 1,
+        "account_activity_density": 0.5,
+        "time_since_last_tx": 0.0
+    }
+    
+    for feat, fallback in defaults.items():
+        if tx_dict.get(feat) is None:
+            tx_dict[feat] = fallback
+            
+    return tx_dict
 
 @app.get("/")
 def health_check():
@@ -63,22 +124,15 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
     if not ml_components.get("fraud_detector"):
         raise HTTPException(status_code=503, detail="Model not loaded")
     
-    expected_new = data.oldbalanceOrg - data.amount
-    error_balance = data.newbalanceOrig - expected_new
+    tx_data = build_behavioral_features(data.model_dump(), db)
+    input_data = pd.DataFrame([tx_data])[FEATURES]
 
-    # 1. Feature Engineering
-    input_data = pd.DataFrame([{
-        "amount": data.amount, 
-        "oldbalanceOrg": data.oldbalanceOrg,
-        "newbalanceOrig": data.newbalanceOrig, 
-        "errorBalanceOrig": error_balance,
-        "type_encoded": data.type_encoded
-    }])[FEATURES]
+    dmatrix_input = xgb.DMatrix(input_data)
 
     # 2. AI Prediction (Base Model)
     model = ml_components["fraud_detector"]
-    prediction = model.predict(input_data)[0]
-    probability = float(model.predict_proba(input_data)[0][1])
+    prediction = 1 if probability >= 0.5 else 0
+    probability = float(model.predict(dmatrix_input)[0])
 
     # 3. NEW: AML & HEURISTIC GUARDRAILS
     # These catch "Common Sense" fraud that the ML model might miss
@@ -168,10 +222,12 @@ async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
     # Prepare data for model (keep only the columns the model was trained on)
     input_features = df_batch[FEATURES]
 
+    dmatrix_batch = xgb.DMatrix(input_features)
+
     # C. Batch AI Prediction
     model = ml_components["fraud_detector"]
-    batch_preds = model.predict(input_features)
-    batch_probs = model.predict_proba(input_features)[:, 1]
+    batch_preds = (batch_probs >= 0.5).astype(int)
+    batch_probs = model.predict(dmatrix_batch)
 
     # D. Batch SHAP Explanations
     explainer = ml_components["explainer"]
