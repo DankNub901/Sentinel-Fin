@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func  # Added for analytics
 from pydantic import BaseModel
 import pandas as pd
+import xgboost as xgb
 import numpy as np
 import shap
 import json
