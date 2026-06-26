@@ -48,6 +48,11 @@ class Transaction(BaseModel):
     amount: float
     nameOrig: str
     nameDest: str
+
+    oldbalanceOrg: float = 0.0      
+    newbalanceOrig: float = 0.0     
+    type_encoded: int = 4
+
     is_simulated: bool = False
     session_id: Optional[str] = None
     
