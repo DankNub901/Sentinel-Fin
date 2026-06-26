@@ -3,10 +3,10 @@ import joblib
 from huggingface_hub import hf_hub_download
 
 # Use your verified repo and filename
-REPO_ID = "xNub/Sentinel-XGBoost"
-FILENAME = "fraud_model.pkl"
+REPO_ID = "xNub/xgboost-fraud-detection-calibrated"
+FILENAME = "calibrated_fraud_model.joblib"
 
-def get_model():
+def get_calibrated_model():
     """
     Downloads the model from Hugging Face (if not already cached)
     and loads it into memory.
@@ -21,14 +21,20 @@ def get_model():
             token=os.getenv("HF_TOKEN")
         )
         
-        model = joblib.load(model_path)
-        print("--- Success: Fraud Detection Brain is Online ---")
-        return model
+        artifacts = joblib.load(model_path)
+        model = artifacts["model"]
+        calibrator = artifacts["calibrator"]
+        features = artifacts["features"]
+
+        print("--- Success: Calibrated Fraud Brain is Online ---")
+        return model, calibrator, features
         
     except Exception as e:
-        print(f"--- Error: Could not load model. {e} ---")
-        return None
+        print(f"--- Error: Could not load calibrated pipeline. {e} ---")
+        return None, None, None
 
 if __name__ == "__main__":
     # Test the loader independently
-    get_model()
+    model, calibrator, features = get_calibrated_model()
+    if model:
+        print(f"Verified features expected by the model: {features}")

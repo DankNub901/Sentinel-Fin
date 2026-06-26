@@ -11,34 +11,69 @@ def client():
     with TestClient(app) as c:
         yield c
 
-def test_health_check():
+def test_health_check(client):
     """Ensure the API is alive"""
-    with TestClient(app) as client:
-        response = client.get("/")
-        assert response.status_code == 200
-        assert "Sentinel-Fin" in response.json()["system"]
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "Sentinel-Fin" in response.json()["system"]
 
-def test_fraud_prediction_schema():
+# --- INTEGRATED SCENARIOS VIA PARAMETERIZATION ---
+@pytest.mark.parametrize(
+    "payload_type, payload, expected_verdict",
+    [
+        (
+            "reasonable_amount",
+            {
+                "step": 11,
+                "type": "TRANSFER",
+                "amount": 1000.0,
+                "nameOrig": "C123456",
+                "nameDest": "M654321"
+            },
+            None  # None means we let the ML model decide freely without forcing an answer key
+        ),
+        (
+            "large_drain_amount",
+            {
+                "step": 11,
+                "type": "TRANSFER",
+                "amount": 950000.0,         # Triggers HEURISTIC_AMOUNT_LIMIT
+                "nameOrig": "C123456",
+                "nameDest": "M654321",
+                "oldbalanceOrg": 1000000.0, # Triggers HEURISTIC_DRAIN_RATIO (95% drain)
+                "newbalanceOrig": 50000.0
+            },
+            "FLAGGED"  # Our answer key explicitly expects the heuristic safety net to catch this
+        )
+    ]
+)
+
+def test_fraud_prediction_schema(client, payload_type, payload, expected_verdict):
     """Ensure the API returns the correct JSON structure and ML logic loads"""
-    with TestClient(app) as client:
-        payload = {
-            "amount": 1000.0,
-            "oldbalanceOrg": 1000.0,
-            "newbalanceOrig": 0.0,
-            "type_encoded": 4 # TRANSFER
-        }
-        response = client.post("/predict", json=payload)
-        data = response.json()
+    response = client.post("/predict", json=payload)
+    data = response.json()
         
-        # This will now be 200 because lifespan loaded the model
-        assert response.status_code == 200
-        assert "is_fraud" in data
-        assert "reasoning" in data
-        assert isinstance(data["reasoning"], list)
+    # This will now be 200 because lifespan loaded the model
+    assert response.status_code == 200
+    assert "is_fraud" in data
+    assert "fraud_probability" in data
+    assert "verdict" in data
+    assert "reasoning" in data
+    assert isinstance(data["reasoning"], list)
 
-def test_invalid_data_handling():
+    if expected_verdict is not None:
+        assert data["verdict"] == expected_verdict
+        # Verify our custom AML reasoning warnings were appended to the audit trail
+        assert any("Heuristic Alert" in r or "AML Warning" in r for r in data["reasoning"])
+
+def test_invalid_data_handling(client):
     """Ensure the API rejects bad data (Industry-ready apps must be strict)"""
-    with TestClient(app) as client:
-        payload = {"amount": "ONE MILLION DOLLARS"} # String instead of float
-        response = client.post("/predict", json=payload)
-        assert response.status_code == 422 # Unprocessable Entity
+    payload = {
+        "step": "NotAnInteger",
+        "type": "TRANSFER",
+        "amount": "ONE MILLION DOLLARS",
+        "nameOrig": "C111",
+        "nameDest": "M222"
+    }
+    response = client.post("/predict", json=payload)
+    assert response.status_code == 422
