@@ -132,8 +132,9 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
 
     # 2. AI Prediction (Base Model)
     model = ml_components["fraud_detector"]
-    prediction = 1 if probability >= 0.5 else 0
     probability = float(model.predict(dmatrix_input)[0])
+    prediction = 1 if probability >= 0.5 else 0
+    
 
     # 3. NEW: AML & HEURISTIC GUARDRAILS
     # These catch "Common Sense" fraud that the ML model might miss
@@ -179,7 +180,7 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
         amount=data.amount,
         old_balance=data.oldbalanceOrg,
         new_balance=data.newbalanceOrig,
-        expected_new_balance=expected_new, # Track the math fix
+        expected_new_balance=data.oldbalanceOrg - data.amount, # Track the math fix
         type_code=data.type_encoded,        # Track the raw position
         name_orig=data.nameOrig,
         name_dest=data.nameDest,
@@ -216,25 +217,22 @@ async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
     # A. Efficiently convert Pydantic list to a single DataFrame
     df_batch = pd.DataFrame([t.model_dump() for t in batch.transactions])
     
-    # B. Vectorized Feature Engineering
-    df_batch['expected_new'] = df_batch['oldbalanceOrg'] - df_batch['amount']
-    df_batch['errorBalanceOrig'] = df_batch['newbalanceOrig'] - df_batch['expected_new']
     
     # Prepare data for model (keep only the columns the model was trained on)
-    input_features = df_batch[FEATURES]
-
-    dmatrix_batch = xgb.DMatrix(input_features)
+    processed_rows = [build_behavioral_features(row, db) for _, row in df_batch.iterrows()]
+    df_features = pd.DataFrame(processed_rows)[FEATURES]
+    dmatrix_batch = xgb.DMatrix(df_features)
 
     # C. Batch AI Prediction
     model = ml_components["fraud_detector"]
-    batch_preds = (batch_probs >= 0.5).astype(int)
     batch_probs = model.predict(dmatrix_batch)
-
+    batch_preds = (batch_probs >= 0.5).astype(int)
+    
     # D. Batch SHAP Explanations
     explainer = ml_components["explainer"]
     # We calculate SHAP for the whole batch at once
-    shap_values_batch = explainer.shap_values(input_features)
-    feature_names = input_features.columns
+    shap_values_batch = explainer.shap_values(df_features)
+    feature_names = df_features.columns
 
     # E. Process Results and Save to DB
     new_logs = []
@@ -256,11 +254,11 @@ async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
 
         # Create Log Object
         new_logs.append(models.PredictionLog(
-            amount=float(row['amount']),
-            old_balance=float(row['oldbalanceOrg']),
+            amount=amt,
+            old_balance=old_bal,
             new_balance=float(row['newbalanceOrig']),
-            expected_new_balance=float(row['expected_new']),
-            type_code=int(row['type_encoded']),
+            expected_new_balance=old_bal - amt,,
+            type_code=int(row.get('type_encoded', TRANSACTION_TYPES.get("TRANSFER", 4))),
             name_orig=row.get('nameOrig', "Unknown"),
             name_dest=row.get('nameDest', "Unknown"),
             is_simulated=bool(row.get('is_simulated', True)), # Assume True for batch
