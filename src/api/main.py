@@ -233,7 +233,7 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
     if target_log.is_fraud:
 
         tx_data = build_behavioral_features(data.model_dump(), db)
-        df_single = pd,DataFrame([tx_data])[FEATURES]
+        df_single = pd.DataFrame([tx_data])[FEATURES]
 
         # calculate SHAP values instantly
         shap_values = ml_components["explainer"].shap_values(df_single)
