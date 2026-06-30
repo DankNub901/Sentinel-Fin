@@ -9,7 +9,7 @@ class TransactionAudit(Base):
     id = Column(Integer, primary_key=True, index=True)
     transaction_id = Column(String, unique=True, index=True)
     amount = Column(Float)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
     
     # ML Results
     fraud_score = Column(Float)  # Probability (0.0 to 1.0)
