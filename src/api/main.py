@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func  # Added for analytics
+from sqlalchemy import func, text  # Added for analytics
 from pydantic import BaseModel
 import pandas as pd
 import xgboost as xgb
@@ -23,7 +23,7 @@ from src.constants import (
     HEURISTIC_DRAIN_RATIO
 )
 
-# 1. Setup the Model & Explainer Container
+# 1. Component Lifespan
 ml_components = {}
 
 
@@ -78,17 +78,11 @@ class Transaction(BaseModel):
 class TransactionBatch(BaseModel):
     transactions: List[Transaction]
 
-# 3. Initialize App
 models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title=API_TITLE, lifespan=lifespan)
 
+# 3. Core Logic Helpers
 def build_behavioral_features(tx_dict: dict, db: Session) -> dict:
-    """
-    Enriches raw transaction data with behavioral metrics.
-    If features are not already provided (e.g., Manual Investigator Entry),
-    this function falls back to baseline values or live DB lookups.
-    """
-    # 1. Direct conversions from raw inputs
     if tx_dict.get("channel_risk") is None:
         tx_dict["channel_risk"] = 1.0 if tx_dict["type"] in ["TRANSFER", "CASH_OUT"] else 0.0
         
@@ -101,7 +95,7 @@ def build_behavioral_features(tx_dict: dict, db: Session) -> dict:
     if tx_dict.get("is_layering_attempt") is None:
         tx_dict["is_layering_attempt"] = 1 if tx_dict["nameOrig"] == tx_dict["nameDest"] else 0
 
-    # 2. Historical Fallbacks for Manual Entry (Can be replaced with raw SQL/Redis window functions)
+    # a. fallbacks for manual entry (Can be replaced with raw SQL/Redis window functions)
     defaults = {
         "dest_mule_heat": 1.0,
         "sender_recent_velocity": 1.0,
@@ -121,6 +115,94 @@ def build_behavioral_features(tx_dict: dict, db: Session) -> dict:
             
     return tx_dict
 
+def process_inference_pipeline(raw_transactions: List[dict], db: Session) -> List[models.PredictionLog]:
+    """The single source of truth enginer for all prediction requests"""
+
+    df_batch = pd.DataFrame(raw_transactions)
+    processed_rows = [build_behavioral_features(row, db) for _, row in df_batch.iterrows()]
+    df_features = pd.DataFrame(processed_rows)[FEATURES]
+
+    model = ml_components["fraud_detector"]
+    batch_probs = model.predict(xgb.DMatrix(df_features))
+    batch_preds = (batch_probs >= 0.5).astype(int)
+
+    new_logs = []
+    for i in range(len(df_batch)):
+        row = df_batch.iloc[i]
+        prob = float(batch_probs[i])
+        pred = int(batch_preds[i])
+        
+        # Heuristic rules engine
+        drain_ratio = row['amount'] / row['oldbalanceOrg'] if row['oldbalanceOrg'] > 0 else 0
+        if row['amount'] > HEURISTIC_AMOUNT_LIMIT and drain_ratio > HEURISTIC_DRAIN_RATIO:
+            pred = 1
+            prob = max(prob, 0.95)
+
+        new_logs.append(models.PredictionLog(
+            amount=float(row["amount"]),
+            old_balance=float(row["oldbalanceOrg"]),
+            new_balance=float(row['newbalanceOrig']),
+            expected_new_balance=float(row["oldbalanceOrg"] - row["amount"]),
+            type_code=int(row.get('type_encoded', TRANSACTION_TYPES.get("TRANSFER", 4))),
+            name_orig=row.get('nameOrig', "Unknown"),
+            name_dest=row.get('nameDest', "Unknown"),
+            is_simulated=bool(row.get('is_simulated', True)),
+            session_id=row.get('session_id'),
+            verdict="FLAGGED" if pred else "APPROVED",
+            probability=prob,
+            is_fraud=bool(pred),
+            status = "PENDING",
+            shap_summary={}
+        ))
+    return new_logs
+
+def check_and_flush_shap_bucket(db: Session):
+    # The Lazy Bucket window rules
+    bucket = db.execute(text("""
+        SELECT COUNT (*), COALESCE(EXTRACT(EPOCH FROM(NOW() - MIN (timestamp))), 0)
+        FROM prediction_logs WHERE is_fraud = TRUE AND STATUS = 'PENDING'
+        """)).fetchone()
+
+    pending_count = bucket[0]
+    oldest_age_seconds = bucket[1]
+
+    if pending_count >= 5 or oldest_age_seconds > 3.0:
+        pending_frauds = db.query(models.PredictionLog).filter_by(is_fraud=True, status="PENDING").all()
+        if pending_frauds:
+            fraud_features = []
+            for pf in pending_frauds:
+
+                ctx = {
+                    "step": pf.step if hasattr(pf, 'step') else 0,
+                    "type": "TRANSFER" if pf.type_code == 4 else "CASH_OUT",
+                    "amount": pf.amount,
+                    "oldbalanceOrg": pf.old_balance,
+                    "nameOrig": pf.name_orig,
+                    "nameDest": pf.name_dest
+                }
+
+                fraud_features.append(build_behavioral_features(feature_ctx, db))
+
+            df_fraud_features = pd.DataFrame(fraud_features)[FEATURES]
+            shap_values_subset = ml_components["explainer"].shap_values(df_fraud_features)
+            feature_names = df_fraud_features.columns
+
+            for idx, log_entry in enumerate(pending_frauds):
+                impacts = dict(zip(feature_names, shap_values_subset[idx]))
+                log_entry.shap_summary = {k: float(v) for k, v in impacts.items()}
+                log_entry.status = "PROCESSED"
+
+            db.commit()
+
+            return {"current_pending_fraud":0, "oldest_fraud_age_sec":0.0}
+
+    return{
+        "current_pending_fraud": pending_count,
+        "oldest_fraud_age_sec": round(oldest_age_seconds, 2)
+    }
+
+
+# 4. API Endpoints
 @app.get("/")
 def health_check():
     return {"status": "active", "system": SYSTEM_NAME}
@@ -130,83 +212,55 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
     if not ml_components.get("fraud_detector"):
         raise HTTPException(status_code=503, detail="Model not loaded")
     
-    tx_data = build_behavioral_features(data.model_dump(), db)
-    input_data = pd.DataFrame([tx_data])[FEATURES]
+    logs = process_inference_pipeline([data.model_dump()], db)
+    target_log = logs[0] 
 
-    dmatrix_input = xgb.DMatrix(input_data)
-
-    # 2. AI Prediction (Base Model)
-    model = ml_components["fraud_detector"]
-    probability = float(model.predict(dmatrix_input)[0])
-    prediction = 1 if probability >= 0.5 else 0
     
-
-    # 3. NEW: AML & HEURISTIC GUARDRAILS
-    # These catch "Common Sense" fraud that the ML model might miss
+    # a2. AML & HEURISTIC GUARDRAILS (manual entry)
     reasoning = []
     drain_ratio = data.amount / data.oldbalanceOrg if data.oldbalanceOrg > 0 else 0
     
-    # Account Drain Check
+    # manual heuristic strings
     if data.amount > HEURISTIC_AMOUNT_LIMIT and drain_ratio > HEURISTIC_DRAIN_RATIO:
-        prediction = 1  # Force the flag
-        probability = max(probability, 0.95)  # Ensure high confidence for the auditor
         reasoning.append(f"Heuristic Alert: Account Drain Detected ({drain_ratio:.2%} depletion)")
-
         # TRANSFER: Flag reason (Layering)
-        if data.type_encoded == TRANSACTION_TYPES["TRANSFER"]:
-            reasoning.append("AML Warning: Possible 'Layering' activity. Rapid fund shifting to external account detected.")
-            reasoning.append("High risk of 'Pass-through' behavior; source of funds may be obscured.")
-        
+        if data.type_encoded == TRANSACTION_TYPES.get("TRANSFER", 4):
+            reasoning.append("AML Warning: Possible 'Layering' activity. Rapid fund shifting detected.")
         #CASH_OUT: Flag reason (Integration)
-        elif data.type_encoded == TRANSACTION_TYPES["CASH_OUT"]:
-            reasoning.append("AML Warning: Possible 'Integration' phase. High-value liquidation of funds to untraceable cash.")
+        elif data.type_encoded == TRANSACTION_TYPES.get("CASH_OUT", 1):
+            reasoning.append("AML Warning: Possible 'Integration' phase. High-value liquidation.")
 
-    # 4. SHAP Explainability (Enhanced to store impacts)
-    shap_data = {} # To store for DB
-    if probability > 0.1:
-        explainer = ml_components["explainer"]
-        shap_values = explainer.shap_values(input_data)
-        feature_names = input_data.columns
+    if target_log.is_fraud:
+
+        tx_data = build_behavioral_features(data.model_dump(), db)
+        df_single = pd.DataFrame([tx_data])[FEATURES]
+
+        # calculate SHAP values instantly
+        shap_values = ml_components["explainer"].shap_values(df_single)
+        feature_names = df_single.columns
+
         impacts = dict(zip(feature_names, shap_values[0]))
-        
-        # Convert floats to strings/standard floats for JSON compatibility
-        shap_data = {k: float(v) for k, v in impacts.items()}
-        
+        target_log.shap_summary = {k: float(v) for k, v in impacts.items()}
+        target_log.status = "PROCESSED"
+
+        # Map to text strings for the investigator
         top_features = sorted(impacts.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
         for feat, val in top_features:
             direction = "increased" if val > 0 else "decreased"
             reasoning.append(f"AI Factor: {feat} {direction} risk score")
+    else:
+        target_log.status = "PROCESSED"
 
-    # 5. Final Verdict Determination
-    verdict = "FLAGGED" if prediction else "APPROVED"
-
-    # 6. Save to Database
-    new_log = models.PredictionLog(
-        amount=data.amount,
-        old_balance=data.oldbalanceOrg,
-        new_balance=data.newbalanceOrig,
-        expected_new_balance=data.oldbalanceOrg - data.amount, # Track the math fix
-        type_code=data.type_encoded,        # Track the raw position
-        name_orig=data.nameOrig,
-        name_dest=data.nameDest,
-        is_simulated=data.is_simulated,     # Track if it's a bot
-        session_id=data.session_id,         # Group the simulation
-        verdict="FLAGGED" if prediction else "APPROVED",
-        probability=probability,
-        is_fraud=bool(prediction),
-        shap_summary=shap_data,
-        status="PENDING"
-    )
-    db.add(new_log)
+    db.add(target_log)
     db.commit()
-    db.refresh(new_log)
+    db.refresh(target_log)
 
     return {
-        "is_fraud": bool(prediction),
-        "fraud_probability": round(probability, 4),
-        "verdict": verdict,
+        "is_fraud": target_log.is_fraud,
+        "fraud_probability": round(target_log.probability, 4),
+        "verdict": target_log.verdict,
         "reasoning": reasoning,
-        "log_id": new_log.id
+        "log_id": target_log.id
     }
 
 # --- 1. Update Schema ---
@@ -219,70 +273,18 @@ async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
     if not ml_components.get("fraud_detector"):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    # A. Efficiently convert Pydantic list to a single DataFrame
-    df_batch = pd.DataFrame([t.model_dump() for t in batch.transactions])
-    
-    
-    # Prepare data for model (keep only the columns the model was trained on)
-    processed_rows = [build_behavioral_features(row, db) for _, row in df_batch.iterrows()]
-    df_features = pd.DataFrame(processed_rows)[FEATURES]
-    dmatrix_batch = xgb.DMatrix(df_features)
-
-    # C. Batch AI Prediction
-    model = ml_components["fraud_detector"]
-    batch_probs = model.predict(dmatrix_batch)
-    batch_preds = (batch_probs >= 0.5).astype(int)
-    
-    # D. Batch SHAP Explanations
-    explainer = ml_components["explainer"]
-    # We calculate SHAP for the whole batch at once
-    shap_values_batch = explainer.shap_values(df_features)
-    feature_names = df_features.columns
-
-    # E. Process Results and Save to DB
-    new_logs = []
-    for i in range(len(df_batch)):
-        # Calculate Heuristic/AML logic per row
-        row = df_batch.iloc[i]
-        current_prob = float(batch_probs[i])
-        current_pred = int(batch_preds[i])
-        
-        # AML Guardrail (Manual override logic)
-        drain_ratio = row['amount'] / row['oldbalanceOrg'] if row['oldbalanceOrg'] > 0 else 0
-        if row['amount'] > HEURISTIC_AMOUNT_LIMIT and drain_ratio > HEURISTIC_DRAIN_RATIO:
-            current_pred = 1
-            current_prob = max(current_prob, 0.95)
-
-        # Extract SHAP for this specific row
-        impacts = dict(zip(feature_names, shap_values_batch[i]))
-        shap_json = {k: float(v) for k, v in impacts.items()}
-
-        # Create Log Object
-        new_logs.append(models.PredictionLog(
-            amount=amt,
-            old_balance=old_bal,
-            new_balance=float(row['newbalanceOrig']),
-            expected_new_balance=old_bal - amt,
-            type_code=int(row.get('type_encoded', TRANSACTION_TYPES.get("TRANSFER", 4))),
-            name_orig=row.get('nameOrig', "Unknown"),
-            name_dest=row.get('nameDest', "Unknown"),
-            is_simulated=bool(row.get('is_simulated', True)), # Assume True for batch
-            session_id=row.get('session_id'),
-            verdict="FLAGGED" if current_pred else "APPROVED",
-            probability=current_prob,
-            is_fraud=bool(current_pred),
-            status = "PENDING",
-            shap_summary=shap_json
-        ))
-
-    # F. Bulk Save to Postgres (The real speed boost)
-    db.add_all(new_logs)
+    logs = process_inference_pipeline([t.model_dump() for t in batch.transactions], db)
+    db.add_all(logs)
     db.commit()
 
+    stats = check_and_flush_shap_bucket(db)
+
+
     return {
-        "processed": len(new_logs), 
-        "flags": sum(1 for l in new_logs if l.is_fraud)
-        }
+        "processed": len(logs), 
+        "flags": sum(1 for l in new_logs if l.is_fraud),
+        "bucket_status": stats
+    }
 
 @app.get("/api/v1/analytics")
 def get_analytics(db: Session = Depends(get_db)):
