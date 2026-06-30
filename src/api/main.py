@@ -224,10 +224,10 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
     if data.amount > HEURISTIC_AMOUNT_LIMIT and drain_ratio > HEURISTIC_DRAIN_RATIO:
         reasoning.append(f"Heuristic Alert: Account Drain Detected ({drain_ratio:.2%} depletion)")
         # TRANSFER: Flag reason (Layering)
-        if data.type_encoded == TRANSACTION_TYPES("TRANSFER", 4):
+        if data.type_encoded == TRANSACTION_TYPES.get("TRANSFER", 4):
             reasoning.append("AML Warning: Possible 'Layering' activity. Rapid fund shifting detected.")
         #CASH_OUT: Flag reason (Integration)
-        elif data.type_encoded == TRANSACTION_TYPES("CASH_OUT", 1):
+        elif data.type_encoded == TRANSACTION_TYPES.get("CASH_OUT", 1):
             reasoning.append("AML Warning: Possible 'Integration' phase. High-value liquidation.")
 
     if target_log.is_fraud:
