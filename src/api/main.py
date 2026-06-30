@@ -241,7 +241,7 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
 
         impacts = dict(zip(feature_names, shap_values[0]))
         target_log.shap_summary = {k: float(v) for k, v in impacts.items()}
-        target_log.status - "PROCESSED"
+        target_log.status = "PROCESSED"
 
         # Map to text strings for the investigator
         top_features = sorted(impacts.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
