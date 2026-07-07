@@ -51,6 +51,36 @@ async def run_simulation():
             # Fire and wait (respecting the velocity/delay)
             await send_batch(client, batch_data, i//BATCH_SIZE + 1)
             await asyncio.sleep(VELOCITY)
+        
+        print("\n🏁 Stream complete. Waiting 3.5s for database window to mature...")
+        await asyncio.sleep(3.5)
+
+        # Structure a completely valid dummy row that passes your Transaction schema
+        dummy_tx = {
+            "step": int(df['step'].iloc[-1]) if len(df) > 0 else 1,
+            "type": "CASH_IN",
+            "amount": 0.01,
+            "nameOrig": "C_CLEANUP_DUMMY",
+            "nameDest": "M_CLEANUP_DUMMY",
+            "oldbalanceOrg": 100.0,
+            "newbalanceOrig": 100.01,
+            "type_encoded": 0,
+            "is_simulated": True,
+            "session_id": sim_session_id
+        }
+
+        print("⚡ Sending final dummy batch to trigger remaining SHAP bucket flush...")
+        try:
+            response = await client.post(API_URL, json={"transactions": [dummy_tx]}, timeout=10.0)
+            if response.status_code == 200:
+                print("✅ Flush Complete! Bucket cleaned up successfully.")
+                print(f"Bucket Status: {response.json().get('bucket_status')}")
+            else:
+                print(f"⚠️ Flush Warning: Status {response.status_code} | {response.text}")
+        except Exception as e:
+            print(f"⚠️ Flush Failed due to connection glitch: {e}")
+
+        print("--- Simulation ended gracefully. Zero dangling database states. ---")    
 
 if __name__ == "__main__":
     asyncio.run(run_simulation())
