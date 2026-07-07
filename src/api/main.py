@@ -181,7 +181,7 @@ def check_and_flush_shap_bucket(db: Session):
                     "nameDest": pf.name_dest
                 }
 
-                fraud_features.append(build_behavioral_features(feature_ctx, db))
+                fraud_features.append(build_behavioral_features(ctx, db))
 
             df_fraud_features = pd.DataFrame(fraud_features)[FEATURES]
             shap_values_subset = ml_components["explainer"].shap_values(df_fraud_features)
@@ -282,7 +282,7 @@ async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
 
     return {
         "processed": len(logs), 
-        "flags": sum(1 for l in new_logs if l.is_fraud),
+        "flags": sum(1 for l in logs if l.is_fraud),
         "bucket_status": stats
     }
 
