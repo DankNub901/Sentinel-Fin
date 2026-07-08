@@ -7,6 +7,7 @@ import xgboost as xgb
 import numpy as np
 import shap
 import json
+import time
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -22,6 +23,10 @@ from src.constants import (
     HEURISTIC_AMOUNT_LIMIT,
     HEURISTIC_DRAIN_RATIO
 )
+
+SHAP_BUFFER_LOGS = []
+SHAP_BUFFER_FEATURES = []
+OLDEST_FRAUD_TIMESTAMP = None
 
 # 1. Component Lifespan
 ml_components = {}
@@ -155,48 +160,37 @@ def process_inference_pipeline(raw_transactions: List[dict], db: Session, defaul
     return new_logs, df_features
 
 def check_and_flush_shap_bucket(db: Session):
-    # The Lazy Bucket window rules
-    bucket = db.execute(text("""
-        SELECT COUNT (*), COALESCE(EXTRACT(EPOCH FROM(NOW() - MIN (timestamp))), 0)
-        FROM prediction_logs WHERE is_fraud = TRUE AND STATUS = 'PENDING'
-        """)).fetchone()
+    global SHAP_BUFFER_LOGS, SHAP_BUFFER_FEATURES, OLDEST_FRAUD_TIMESTAMP
 
-    pending_count = bucket[0]
-    oldest_age_seconds = bucket[1]
+    if not SHAP_BUFFER_LOGS:
+        return {"current_pending_fraud":0, "oldest_fraud_age":0.0}
 
-    if pending_count >= 5 or oldest_age_seconds > 3.0:
-        pending_frauds = db.query(models.PredictionLog).filter_by(is_fraud=True, status="PENDING").all()
-        if pending_frauds:
-            fraud_features = []
-            for pf in pending_frauds:
+    oldest_age_seconds = time.time() - OLDEST_FRAUD_TIMESTAMP
 
-                ctx = {
-                    "step": pf.step if hasattr(pf, 'step') else 0,
-                    "type": "TRANSFER" if pf.type_code == 4 else "CASH_OUT",
-                    "amount": pf.amount,
-                    "oldbalanceOrg": pf.old_balance,
-                    "nameOrig": pf.name_orig,
-                    "nameDest": pf.name_dest
-                }
+    if len(SHAP_BUFFER_LOGS) >= 5 or oldest_age_seconds > 3.0:
+        df_fraud_features = pd.DataFrame(SHAP_BUFFER_FEATURES)[FEATURES]
 
-                fraud_features.append(build_behavioral_features(ctx, db))
+        shap_values_subset = ml_components["explainer"].shap_values(df_fraud_features)
+        feature_names = df_fraud_features.columns
 
-            df_fraud_features = pd.DataFrame(fraud_features)[FEATURES]
-            shap_values_subset = ml_components["explainer"].shap_values(df_fraud_features)
-            feature_names = df_fraud_features.columns
+        for idx, log_entry in enumerate(SHAP_BUFFER_LOGS):
+            
+            active_log = db.merge(log_entry)
+            impacts = dict(zip(feature_names, shap_values_subset[idx]))
+            active_log.shap_summary = {k: float(v) for k, v in impacts.items()}
+            active_log.status = "PROCESSED"
 
-            for idx, log_entry in enumerate(pending_frauds):
-                impacts = dict(zip(feature_names, shap_values_subset[idx]))
-                log_entry.shap_summary = {k: float(v) for k, v in impacts.items()}
-                log_entry.status = "PROCESSED"
+        db.commit()
 
-            db.commit()
+        SHAP_BUFFER_LOGS.clear()
+        SHAP_BUFFER_FEATURES.clear()
+        OLDEST_FRAUD_TIMESTAMP = None
 
-            return {"current_pending_fraud":0, "oldest_fraud_age_sec":0.0}
+        return {"current_pending_fraud":0, "oldest_fraud_age":0.0}
 
     return{
-        "current_pending_fraud": pending_count,
-        "oldest_fraud_age_sec": round(oldest_age_seconds, 2)
+        "current_pending_fraud": len(SHAP_BUFFER_LOGS),
+        "oldest_fraud_age": round(oldest_age_seconds, 2)
     }
 
 
@@ -259,15 +253,26 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
 # --- Add the Batch Endpoint ---
 @app.post("/predict/batch")
 async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
+    global SHAP_BUFFER_LOGS, SHAP_BUFFER_FEATURES, OLDEST_FRAUD_TIMESTAMP
+
     if not ml_components.get("fraud_detector"):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    logs, _ = process_inference_pipeline([t.model_dump() for t in batch.transactions], db)
+    raw_tx_list = [t.model_dump() for t in batch.transactions]
+    logs, df_features = process_inference_pipeline(raw_tx_list, db, default_status="PENDING")
+    
     db.add_all(logs)
     db.commit()
 
-    stats = check_and_flush_shap_bucket(db)
+    for i, log in enumerate(logs):
+        if log.is_fraud:
+            if not SHAP_BUFFER_LOGS:
+                OLDEST_FRAUD_TIMESTAMP = time.time()
+                
+            SHAP_BUFFER_LOGS.append(log)
+            SHAP_BUFFER_FEATURES.append(df_features.iloc[i].to_dict())
 
+    stats = check_and_flush_shap_bucket(db)
 
     return {
         "processed": len(logs), 
