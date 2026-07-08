@@ -115,11 +115,10 @@ def build_behavioral_features(tx_dict: dict, db: Session) -> dict:
             
     return tx_dict
 
-def process_inference_pipeline(raw_transactions: List[dict], db: Session) -> List[models.PredictionLog]:
+def process_inference_pipeline(raw_transactions: List[dict], db: Session, default_status: str = "PENDING") -> tuple[List[models.PredictionLog], pd.DataFrame]:
     """The single source of truth enginer for all prediction requests"""
 
-    df_batch = pd.DataFrame(raw_transactions)
-    processed_rows = [build_behavioral_features(row, db) for _, row in df_batch.iterrows()]
+    processed_rows = [build_behavioral_features(tx, db) for tx in raw_transactions]
     df_features = pd.DataFrame(processed_rows)[FEATURES]
 
     model = ml_components["fraud_detector"]
@@ -127,8 +126,7 @@ def process_inference_pipeline(raw_transactions: List[dict], db: Session) -> Lis
     batch_preds = (batch_probs >= 0.5).astype(int)
 
     new_logs = []
-    for i in range(len(df_batch)):
-        row = df_batch.iloc[i]
+    for i, row in enumerate(processed_rows)
         prob = float(batch_probs[i])
         pred = int(batch_preds[i])
         
@@ -151,10 +149,10 @@ def process_inference_pipeline(raw_transactions: List[dict], db: Session) -> Lis
             verdict="FLAGGED" if pred else "APPROVED",
             probability=prob,
             is_fraud=bool(pred),
-            status = "PENDING",
+            status = default_status,
             shap_summary={}
         ))
-    return new_logs
+    return new_logs, df_features
 
 def check_and_flush_shap_bucket(db: Session):
     # The Lazy Bucket window rules
@@ -212,7 +210,7 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
     if not ml_components.get("fraud_detector"):
         raise HTTPException(status_code=503, detail="Model not loaded")
     
-    logs = process_inference_pipeline([data.model_dump()], db)
+    logs, df_features = process_inference_pipeline([data.model_dump()], db, default_status="PROCESSED")
     target_log = logs[0] 
 
     
@@ -232,24 +230,18 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
 
     if target_log.is_fraud:
 
-        tx_data = build_behavioral_features(data.model_dump(), db)
-        df_single = pd.DataFrame([tx_data])[FEATURES]
-
         # calculate SHAP values instantly
-        shap_values = ml_components["explainer"].shap_values(df_single)
-        feature_names = df_single.columns
+        shap_values = ml_components["explainer"].shap_values(df_features)
+        feature_names = df_features.columns
 
         impacts = dict(zip(feature_names, shap_values[0]))
         target_log.shap_summary = {k: float(v) for k, v in impacts.items()}
-        target_log.status = "PROCESSED"
 
         # Map to text strings for the investigator
         top_features = sorted(impacts.items(), key=lambda x: abs(x[1]), reverse=True)[:3]
         for feat, val in top_features:
             direction = "increased" if val > 0 else "decreased"
             reasoning.append(f"AI Factor: {feat} {direction} risk score")
-    else:
-        target_log.status = "PROCESSED"
 
     db.add(target_log)
     db.commit()
@@ -263,17 +255,14 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
         "log_id": target_log.id
     }
 
-# --- 1. Update Schema ---
-class TransactionBatch(BaseModel):
-    transactions: List[Transaction]
 
-# --- 2. Add the Batch Endpoint ---
+# --- Add the Batch Endpoint ---
 @app.post("/predict/batch")
 async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
     if not ml_components.get("fraud_detector"):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    logs = process_inference_pipeline([t.model_dump() for t in batch.transactions], db)
+    logs, _ = process_inference_pipeline([t.model_dump() for t in batch.transactions], db)
     db.add_all(logs)
     db.commit()
 
