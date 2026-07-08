@@ -126,7 +126,7 @@ def process_inference_pipeline(raw_transactions: List[dict], db: Session, defaul
     batch_preds = (batch_probs >= 0.5).astype(int)
 
     new_logs = []
-    for i, row in enumerate(processed_rows)
+    for i, row in enumerate(processed_rows):
         prob = float(batch_probs[i])
         pred = int(batch_preds[i])
         
