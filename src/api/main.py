@@ -8,6 +8,7 @@ import numpy as np
 import shap
 import json
 import time
+import asyncio
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
@@ -27,6 +28,7 @@ from src.constants import (
 SHAP_BUFFER_LOGS = []
 SHAP_BUFFER_FEATURES = []
 OLDEST_FRAUD_TIMESTAMP = None
+SHAP_LOCK = asyncio.Lock()
 
 # 1. Component Lifespan
 ml_components = {}
@@ -159,18 +161,18 @@ def process_inference_pipeline(raw_transactions: List[dict], db: Session, defaul
         ))
     return new_logs, df_features
 
-def check_and_flush_shap_bucket(db: Session):
+async def check_and_flush_shap_bucket(db: Session):
     global SHAP_BUFFER_LOGS, SHAP_BUFFER_FEATURES, OLDEST_FRAUD_TIMESTAMP
 
     if not SHAP_BUFFER_LOGS:
-        return {"current_pending_fraud":0, "oldest_fraud_age":0.0}
+        return {"current_pending_fraud":0, "oldest_fraud_age_sec":0.0}
 
     oldest_age_seconds = time.time() - OLDEST_FRAUD_TIMESTAMP
 
     if len(SHAP_BUFFER_LOGS) >= 5 or oldest_age_seconds > 3.0:
-        df_fraud_features = pd.DataFrame(SHAP_BUFFER_FEATURES)[FEATURES]
+        df_fraud_features = pd.concat(SHAP_BUFFER_FEATURES, axis=0).reset_index(drop=True)
 
-        shap_values_subset = ml_components["explainer"].shap_values(df_fraud_features)
+        shap_values_subset = ml_components["explainer"].shap_values(xgb.DMatrix(df_fraud_features))
         feature_names = df_fraud_features.columns
 
         for idx, log_entry in enumerate(SHAP_BUFFER_LOGS):
@@ -186,11 +188,11 @@ def check_and_flush_shap_bucket(db: Session):
         SHAP_BUFFER_FEATURES.clear()
         OLDEST_FRAUD_TIMESTAMP = None
 
-        return {"current_pending_fraud":0, "oldest_fraud_age":0.0}
+        return {"current_pending_fraud":0, "oldest_fraud_age_sec":0.0}
 
     return{
         "current_pending_fraud": len(SHAP_BUFFER_LOGS),
-        "oldest_fraud_age": round(oldest_age_seconds, 2)
+        "oldest_fraud_age_sec": round(oldest_age_seconds, 2)
     }
 
 
@@ -225,7 +227,7 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
     if target_log.is_fraud:
 
         # calculate SHAP values instantly
-        shap_values = ml_components["explainer"].shap_values(df_features)
+        shap_values = ml_components["explainer"].shap_values(xgb.DMatrix(df_features))
         feature_names = df_features.columns
 
         impacts = dict(zip(feature_names, shap_values[0]))
@@ -264,15 +266,16 @@ async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
     db.add_all(logs)
     db.commit()
 
-    for i, log in enumerate(logs):
-        if log.is_fraud:
-            if not SHAP_BUFFER_LOGS:
-                OLDEST_FRAUD_TIMESTAMP = time.time()
-                
-            SHAP_BUFFER_LOGS.append(log)
-            SHAP_BUFFER_FEATURES.append(df_features.iloc[i].to_dict())
+    async with SHAP_LOCK:
+        for i, log in enumerate(logs):
+            if log.is_fraud:
+                if not SHAP_BUFFER_LOGS:
+                    OLDEST_FRAUD_TIMESTAMP = time.time()
+                    
+                SHAP_BUFFER_LOGS.append(log)
+                SHAP_BUFFER_FEATURES.append(df_features.iloc[[i]])
 
-    stats = check_and_flush_shap_bucket(db)
+        stats = await check_and_flush_shap_bucket(db)
 
     return {
         "processed": len(logs), 
@@ -282,9 +285,15 @@ async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
 
 @app.get("/api/v1/analytics")
 def get_analytics(db: Session = Depends(get_db)):
-    total_processed = db.query(models.PredictionLog).count()
-    total_flagged = db.query(models.PredictionLog).filter(models.PredictionLog.verdict == "FLAGGED").count()
-    avg_prob = db.query(func.avg(models.PredictionLog.probability)).scalar() or 0
+    analytics = db.query(
+        func.count(models.PredictionLog.id).label("total"),
+        func.count(func.nullif(models.PredictionLog.verdict != "FLAGGED", True)).label("flagged"),
+        func.avg(models.PredictionLog.probability).label("avg_prob")
+    ).first()
+
+    total_processed = analytics.total or 0
+    total_flagged = analytics.flagged or 0
+    avg_prob = analytics.avg_prob or 0
     
     # Get the 5 most recent threats
     threats = db.query(models.PredictionLog)\
