@@ -7,7 +7,7 @@ from src.constants import TRANSACTION_TYPES, API_TITLE
 
 # Configuration
 API_URL = os.getenv("API_URL", "http://api:8000/predict/batch")
-CSV_FILE = "/app/data/simulation/simulation_ready_for_redis.csv"
+CSV_FILE = os.getenv("STREAM_CSV_PATH","/app/data/simulation/streaming_feed.csv")
 BATCH_SIZE = 50
 VELOCITY = float(os.getenv("VELOCITY", 1.0))
 
@@ -31,7 +31,18 @@ async def run_simulation():
     sim_session_id = f"sim_{uuid.uuid4().hex[:8]}"
 
     df = pd.read_csv(CSV_FILE)
-    df['type_encoded'] = df['type'].map(TRANSACTION_TYPES)
+    if "type_encoded" not in df.columns:
+        df["type_encoded"] = df["type"].map(TRANSACTION_TYPES).fillna(0).astype(int)
+
+    # Strip ground truth labels ('isFraud') if present to prevent target leakage
+    if "isFraud" in df.columns:
+        df = df.drop(columns=["isFraud"])
+
+    # Ensure required numerical data types are strictly cast
+    df["step"] = df["step"].astype(int)
+    df["amount"] = df["amount"].astype(float)
+    df["oldbalanceOrg"] = df["oldbalanceOrg"].astype(float)
+    df["newbalanceOrig"] = df["newbalanceOrig"].astype(float)
     
     # Adding Metadata so the API/DB can track this correctly
     df['is_simulated'] = True
