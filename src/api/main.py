@@ -15,6 +15,7 @@ from typing import List, Optional
 from src.database.connection import engine, get_db
 from src.database import models
 from src.engine.loader import get_calibrated_model
+from src.database.redis_client import get_redis, check_redis_health
 
 from src.constants import (
     FEATURES, 
@@ -36,17 +37,29 @@ ml_components = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Load model once on startup
+    # 1. Load model once on startup
     model, calibrator, features = get_calibrated_model()
-    
     if not model:
         print("CRITICAL: Failed to load calibrated fraud brain.")
     
     ml_components["fraud_detector"] = model
-    # Pre-initialize the SHAP explainer (TreeExplainer is fastest for XGBoost)
     ml_components["explainer"] = shap.TreeExplainer(model)
+    
+    # 2. Connect to Redis Feature Store
+    print("🔌 Connecting to Redis Feature Store...")
+    try:
+        await get_redis()
+        if await check_redis_health():
+            print("✅ Redis Feature Store is Online!")
+        else:
+            print("⚠️ Redis Startup Warning: Ping failed.")
+    except Exception as e:
+        print(f"⚠️ Redis Connection Error: {e}")
+
     yield
     ml_components.clear()
+    print("🧹 Closing Redis connection pool...")
+    await close_redis()
 
 # 2. Schema
 class Transaction(BaseModel):
@@ -89,7 +102,7 @@ models.Base.metadata.create_all(bind=engine)
 app = FastAPI(title=API_TITLE, lifespan=lifespan)
 
 # 3. Core Logic Helpers
-def build_behavioral_features(tx_dict: dict, db: Session) -> dict:
+async def build_behavioral_features(tx_dict: dict, db: Session, redis_conn=None) -> dict:
     if tx_dict.get("channel_risk") is None:
         tx_dict["channel_risk"] = 1.0 if tx_dict["type"] in ["TRANSFER", "CASH_OUT"] else 0.0
         
@@ -122,10 +135,15 @@ def build_behavioral_features(tx_dict: dict, db: Session) -> dict:
             
     return tx_dict
 
-def process_inference_pipeline(raw_transactions: List[dict], db: Session, default_status: str = "PENDING") -> tuple[List[models.PredictionLog], pd.DataFrame]:
+async def process_inference_pipeline(raw_transactions: List[dict], db: Session, default_status: str = "PENDING") -> tuple[List[models.PredictionLog], pd.DataFrame]:
     """The single source of truth enginer for all prediction requests"""
 
-    processed_rows = [build_behavioral_features(tx, db) for tx in raw_transactions]
+    redis_conn = await get_redis()
+
+    processed_rows = [
+        await build_behavioral_features(tx, db, redis_conn=redis_conn) 
+        for tx in raw_transactions
+        ]
     df_features = pd.DataFrame(processed_rows)[FEATURES]
 
     model = ml_components["fraud_detector"]
@@ -206,7 +224,7 @@ async def predict_fraud(data: Transaction, db: Session = Depends(get_db)):
     if not ml_components.get("fraud_detector"):
         raise HTTPException(status_code=503, detail="Model not loaded")
     
-    logs, df_features = process_inference_pipeline([data.model_dump()], db, default_status="PROCESSED")
+    logs, df_features = await process_inference_pipeline([data.model_dump()], db, default_status="PROCESSED")
     target_log = logs[0] 
 
     
@@ -261,7 +279,7 @@ async def predict_batch(batch: TransactionBatch, db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     raw_tx_list = [t.model_dump() for t in batch.transactions]
-    logs, df_features = process_inference_pipeline(raw_tx_list, db, default_status="PENDING")
+    logs, df_features = await process_inference_pipeline(raw_tx_list, db, default_status="PENDING")
     
     db.add_all(logs)
     db.commit()

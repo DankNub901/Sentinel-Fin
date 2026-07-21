@@ -16,8 +16,11 @@ services:
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_HOST=${POSTGRES_HOST}
       - HF_TOKEN=${HF_TOKEN}
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     networks:
       - sentinel_network
@@ -70,6 +73,24 @@ services:
     networks:
       - sentinel_network
     restart: always
+  
+  # 5. The Feature Store / Memory Cache
+  redis:
+    image: redis:7-alpine
+    container_name: sentinel_redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - sentinel_network
+    restart: always
 
 networks:
   sentinel_network:
@@ -79,3 +100,4 @@ networks:
 volumes:
   postgres_data:
   ollama_storage:
+  redis_data:
