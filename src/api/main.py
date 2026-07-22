@@ -15,7 +15,7 @@ from typing import List, Optional
 from src.database.connection import engine, get_db
 from src.database import models
 from src.engine.loader import get_calibrated_model
-from src.database.redis_client import get_redis, check_redis_health
+from src.database.redis_client import get_redis, check_redis_health, close_redis
 
 from src.constants import (
     FEATURES, 
